@@ -1,0 +1,17 @@
+[package]
+name = "workspace-order"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reorder herdr workspaces from the keyboard"
+
+[[bin]]
+name = "workspace-order"
+path = "src/main.rs"
+
+[dependencies]
+herdr-api.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+anyhow.workspace = true

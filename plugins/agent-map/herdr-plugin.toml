@@ -1,0 +1,34 @@
+# `id` is the stable handle every CLI subcommand takes (enable/disable/config-dir)
+# and, per herdr's own validation, must match the managed checkout path when the
+# plugin is installed from a forge. Letters, digits, `:._-` only.
+id = "agent-map"
+name = "agent-map"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "A radial overview of every running agent, grouped by repository"
+platforms = ["macos", "linux"]
+
+# Built into the plugin's own directory rather than the cargo workspace's shared
+# target/. The manifest's commands resolve relative to the plugin root, and with a
+# shared target dir that would mean reaching up out of the plugin with ../../ —
+# which breaks the moment the plugin is installed standalone.
+[[build]]
+command = ["cargo", "build", "--release", "--bin", "agent-map", "--target-dir", "./target"]
+
+# Summoned view: open it, read it, dismiss it. Sized generously because the radial
+# layout needs room — below roughly 60x20 it degrades to a cramped ring.
+[[panes]]
+id = "map"
+title = "Agent Map"
+placement = "popup"
+width = 110
+height = 34
+command = ["./target/release/agent-map"]
+
+# The same binary as a persistent tab, for leaving it open on a second monitor.
+# Which of the two actually gets used is still an open question, so both ship.
+[[panes]]
+id = "map-tab"
+title = "Agent Map (tab)"
+placement = "tab"
+command = ["./target/release/agent-map"]

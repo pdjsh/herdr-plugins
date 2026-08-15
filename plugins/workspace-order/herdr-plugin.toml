@@ -1,0 +1,19 @@
+id = "workspace-order"
+name = "workspace-order"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Reorder herdr workspaces from the keyboard"
+platforms = ["macos", "linux"]
+
+[[build]]
+command = ["cargo", "build", "--release", "--bin", "workspace-order", "--target-dir", "./target"]
+
+# A short popup: this is a list you nudge a couple of rows and dismiss, not
+# something to leave open.
+[[panes]]
+id = "order"
+title = "Workspace Order"
+placement = "popup"
+width = 72
+height = 18
+command = ["./target/release/workspace-order"]

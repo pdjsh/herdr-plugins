@@ -1,0 +1,17 @@
+[package]
+name = "agent-map"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A radial overview of every herdr agent, grouped by repository"
+
+[[bin]]
+name = "agent-map"
+path = "src/main.rs"
+
+[dependencies]
+herdr-api.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+anyhow.workspace = true
