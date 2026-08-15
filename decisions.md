@@ -41,8 +41,8 @@ You deferred this one explicitly. I gathered facts (below) and touched nothing.
 ### Dotfiles — committed to a branch, **not pushed**
 
 Branch `feat/macos-keybinds` in `~/.local/share/chezmoi`, worktree at
-`.worktrees/macos-keybinds`, commit `13bce11`. **Not applied to your home
-directory** — review it, then `chezmoi apply`.
+`.worktrees/macos-keybinds`, commits `13bce11` and `89086a8`. **Not applied to your
+home directory** — review it, then `chezmoi apply`.
 
 Not pushed because you made Codeberg the origin and this laptop has no Codeberg
 credentials (no keychain entry, no Codeberg SSH key — only `github`, `nuc`,
@@ -53,6 +53,7 @@ so I left it local.
 | --- | --- |
 | `dot_config/ghostty/config` → `config.tmpl` | Renamed to a chezmoi template; adds `macos-option-as-alt = true` inside `{{ if eq .chezmoi.os "darwin" }}` |
 | `dot_config/herdr/config.toml` | `prompt_new_workspace_name`, `last_pane`, `swap_pane_{left,down,up,right}`, `copy_mode`; corrected the stale 0.7.5 reordering comment |
+| `.gitignore` (new) | Ignores `.worktrees/`, per your worktree-location rule |
 
 **The Ghostty fix is the important one.** On macOS Ghostty defaults Option to a
 compose key, so `alt+j`/`alt+k`, `prefix+alt+1..9`, and `prefix+alt+g` were all dead
