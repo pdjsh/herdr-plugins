@@ -548,9 +548,11 @@ def collect_prs(cfg: dict[str, Any], since: dt.datetime) -> tuple[dict[str, Any]
         if (parse_iso(p.get("closed_at")) or dt.datetime.min.replace(tzinfo=dt.timezone.utc)) >= since
     ]
 
-    limit = int(cfg.get("pr_detail_limit", 12))
+    limit = int(cfg.get("pr_detail_limit", 20))
     needing = (prs["mine"] + prs["review_requested"])[:limit]
     if needing:
+        # `enrich_pr` mutates the dicts in place, and those dicts are the same
+        # objects the buckets hold — the mapped results are deliberately dropped.
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
             list(pool.map(lambda p: enrich_pr(p, timeout), needing))
     if len(prs["mine"]) + len(prs["review_requested"]) > limit:
@@ -1235,9 +1237,16 @@ def read_cache(max_age: float) -> dict[str, Any] | None:
 def write_cache(doc: dict[str, Any]) -> None:
     try:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        # Write-then-rename so a reader never sees a half-written document.
-        tmp = CACHE_PATH.with_suffix(".tmp")
+        # Write-then-rename so a reader never sees a half-written document. The
+        # pid is in the temporary name because the herdr pane and a Claude
+        # session collect independently and can easily overlap.
+        tmp = CACHE_PATH.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(doc), encoding="utf-8")
+        # 0600, not the umask default. The document carries commit subjects,
+        # pull-request titles and the opening line of Claude prompts — the same
+        # material as the transcripts it is derived from, and there is no reason
+        # for a second, world-readable copy of it.
+        os.chmod(tmp, 0o600)
         tmp.replace(CACHE_PATH)
     except OSError:
         pass  # the cache is an optimisation, never a requirement

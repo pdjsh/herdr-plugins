@@ -1,0 +1,36 @@
+# `id` is the stable handle every CLI subcommand takes (enable/disable/config-dir)
+# and, per herdr's own validation, must match the managed checkout path when the
+# plugin is installed from a forge. Letters, digits, `:._-` only.
+id = "daybook"
+name = "daybook"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "A morning read of what moved and what is still open, across every repo and agent"
+platforms = ["macos", "linux"]
+
+# Built into the plugin's own directory rather than the cargo workspace's shared
+# target/, for the same reason agent-map is: manifest commands resolve relative
+# to the plugin root, and a shared target dir would mean reaching up out of the
+# plugin with ../../ — which breaks the moment the plugin is installed standalone.
+[[build]]
+command = ["cargo", "build", "--release", "--bin", "daybook", "--target-dir", "./target"]
+
+# The summoned view: open it with coffee, read it, dismiss it. Wider than
+# agent-map's popup because the left column carries full sentences ("rating-
+# processors#11 has failing checks: deploy, test") rather than short labels.
+[[panes]]
+id = "brief"
+title = "Daybook"
+placement = "popup"
+width = 120
+height = 32
+command = ["./target/release/daybook"]
+
+# The same binary as a persistent tab, for leaving open on a second monitor.
+# It self-refreshes, so this is the placement where the 30s offline cadence
+# earns its keep.
+[[panes]]
+id = "brief-tab"
+title = "Daybook (tab)"
+placement = "tab"
+command = ["./target/release/daybook"]

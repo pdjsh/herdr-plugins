@@ -435,6 +435,28 @@ class TestCache(unittest.TestCase):
     def test_max_age_zero_never_reads_the_cache(self):
         self.assertIsNone(db.read_cache(0))
 
+    def test_the_cache_is_not_world_readable(self):
+        # It holds commit subjects, PR titles, and the first line of prompts.
+        with tempfile.TemporaryDirectory() as tmp:
+            original = db.CACHE_PATH
+            try:
+                db.CACHE_PATH = Path(tmp) / "latest.json"
+                db.write_cache({"schema": db.SCHEMA})
+                mode = db.CACHE_PATH.stat().st_mode & 0o777
+                self.assertEqual(mode, 0o600, oct(mode))
+            finally:
+                db.CACHE_PATH = original
+
+    def test_a_failed_write_is_swallowed(self):
+        # The cache is an optimisation; an unwritable directory must not take
+        # the whole briefing down.
+        original = db.CACHE_PATH
+        try:
+            db.CACHE_PATH = Path("/nonexistent-root-dir/daybook/latest.json")
+            db.write_cache({"schema": db.SCHEMA})
+        finally:
+            db.CACHE_PATH = original
+
 
 if __name__ == "__main__":
     unittest.main()

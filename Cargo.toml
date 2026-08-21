@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/herdr-api",
     "plugins/agent-map",
+    "plugins/daybook",
     "plugins/workspace-order",
 ]
 
