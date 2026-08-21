@@ -125,6 +125,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "daybook"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "herdr-api",
+ "ratatui",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

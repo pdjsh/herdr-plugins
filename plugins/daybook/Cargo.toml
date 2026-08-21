@@ -1,0 +1,22 @@
+[package]
+name = "daybook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A morning read of what moved and what is still open, across every repo and agent"
+
+[[bin]]
+name = "daybook"
+path = "src/main.rs"
+
+[dependencies]
+# Only for `Status`: the pane colours agents with exactly the glyphs and bands
+# agent-map and the herdr sidebar use, and duplicating that mapping is how the
+# three drift apart.
+herdr-api.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
