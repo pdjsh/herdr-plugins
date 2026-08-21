@@ -125,11 +125,17 @@ Friday, and a briefing that silently skips a weekend is worse than one that says
 ### Refresh cadence
 
 Two cadences, because the sources age at very different rates. Every 30s the pane
-re-reads git, transcripts and the agent roster offline (~1.5s over a dozen
-repositories). Every 5 minutes it also re-reads pull requests, which cost a dozen
-network round trips. In between, the last known PR state is carried forward rather
-than blanked — the alternative is PRs blinking out of the list every half minute.
-`r` forces a full refresh; `n` pins it offline.
+re-reads git, transcripts and the agent roster offline (under a second over a
+dozen repositories). Every 5 minutes it also re-reads pull requests, which cost a
+dozen network round trips. In between, the last known PR state is carried forward
+rather than blanked — the alternative is PRs blinking out of the list every half
+minute. `r` forces a full refresh; `n` pins it offline.
+
+The offline pass is run with `--no-cache`, because the cache is shared with
+`/standup`: a document with empty pull-request lists must never be what a briefing
+reads. For the same reason `--max-age` will not serve an offline-collected
+document to a caller that wanted the network, nor a differently-windowed one to a
+caller that passed `--since`.
 
 ### Using the collector on its own
 
@@ -202,9 +208,18 @@ Then enable and open:
 
 ```sh
 herdr plugin enable agent-map
-herdr plugin pane open agent-map map          # popup
-herdr plugin pane open agent-map map-tab      # persistent tab
+herdr plugin pane open --plugin agent-map --entrypoint map       # popup
+herdr plugin pane open --plugin agent-map --entrypoint map-tab   # persistent tab
+
+herdr plugin enable daybook
+herdr plugin pane open --plugin daybook --entrypoint brief
+herdr plugin pane open --plugin daybook --entrypoint brief-tab
 ```
+
+`herdr plugin pane open` takes named flags, not positional arguments — a
+positional plugin id fails with `unknown option`. Close a popup with `q` from
+inside it: as of 0.8.0 an overlay pane is not addressable by
+`herdr plugin pane close`, which only finds `tab`-placed ones.
 
 Each plugin builds into its own `target/` (via `--target-dir ./target`) rather
 than the workspace's shared one, because manifest commands resolve relative to the

@@ -18,6 +18,7 @@ import importlib.util
 import json
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 # The module has a hyphen in its name, which `import` cannot spell.
@@ -325,6 +326,70 @@ class TestAttention(unittest.TestCase):
         self.assertIn("session-unanswered", kinds(attention(sessions=[session])))
 
 
+class TestPorcelainParsing(unittest.TestCase):
+    """`inspect_checkout` is subprocess-driven, so the parser is exercised through
+    a fake `run` rather than a real repository."""
+
+    def counts(self, porcelain):
+        calls = []
+
+        def fake_run(cmd, cwd=None, timeout=20):
+            calls.append(cmd)
+            if "status" in cmd:
+                return 0, porcelain, ""
+            if "--abbrev-ref" in cmd:
+                return 0, "main\n", ""
+            return 1, "", ""
+
+        original = db.run
+        try:
+            db.run = fake_run
+            return db.inspect_checkout(Path("/r/repo"), 5)
+        finally:
+            db.run = original
+
+    def test_plain_modifications_and_untracked_files(self):
+        info = self.counts("M  a.py\0 M b.py\0?? c.py\0")
+        self.assertEqual((info["staged"], info["unstaged"], info["untracked"]), (1, 1, 1))
+        self.assertEqual(info["dirty"], 3)
+
+    def test_a_rename_does_not_have_its_old_path_counted_again(self):
+        info = self.counts("R  new.py\0old.py\0")
+        self.assertEqual(info["dirty"], 1)
+        self.assertEqual(info["dirty_paths"], ["new.py"])
+
+    def test_a_copy_does_not_have_its_source_counted_again(self):
+        # `C` emits two path fields just like `R`. Skipping only `R` meant the
+        # source path was parsed as a fresh entry, its first two characters read
+        # as status codes.
+        info = self.counts("C  copy.py\0source.py\0")
+        self.assertEqual(info["dirty"], 1)
+        self.assertEqual(info["dirty_paths"], ["copy.py"])
+
+    def test_a_clean_tree_is_clean(self):
+        info = self.counts("")
+        self.assertEqual(info["dirty"], 0)
+        self.assertFalse(info["has_upstream"])
+
+
+class TestXdgPaths(unittest.TestCase):
+    def test_an_empty_variable_falls_back_instead_of_going_relative(self):
+        import os
+
+        for value in ("", "   "):
+            with unittest.mock.patch.dict(os.environ, {"XDG_CACHE_HOME": value}):
+                path = db._xdg("XDG_CACHE_HOME", "~/.cache")
+            self.assertTrue(path.is_absolute(), f"{value!r} produced {path}")
+
+    def test_a_tilde_in_the_variable_is_expanded(self):
+        import os
+
+        with unittest.mock.patch.dict(os.environ, {"XDG_CACHE_HOME": "~/somewhere"}):
+            path = db._xdg("XDG_CACHE_HOME", "~/.cache")
+        self.assertTrue(path.is_absolute())
+        self.assertNotIn("~", str(path))
+
+
 class TestWindow(unittest.TestCase):
     def test_explicit_since_is_taken_verbatim(self):
         start, window = db.resolve_window(dict(db.DEFAULT_CONFIG), "2026-08-18")
@@ -425,7 +490,7 @@ class TestCache(unittest.TestCase):
             original = db.CACHE_PATH
             try:
                 db.CACHE_PATH = Path(tmp) / "latest.json"
-                db.write_cache({"schema": db.SCHEMA, "totals": {"commits": 4}})
+                db.write_cache({"schema": db.SCHEMA, "net": True, "totals": {"commits": 4}})
                 got = db.read_cache(3600)
                 self.assertTrue(got["from_cache"])
                 self.assertEqual(got["totals"]["commits"], 4)
@@ -434,6 +499,43 @@ class TestCache(unittest.TestCase):
 
     def test_max_age_zero_never_reads_the_cache(self):
         self.assertIsNone(db.read_cache(0))
+
+    def _cached(self, doc):
+        """Write `doc` as the cache and return a reader bound to it."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        original = db.CACHE_PATH
+        self.addCleanup(lambda: setattr(db, "CACHE_PATH", original))
+        db.CACHE_PATH = Path(tmp.name) / "latest.json"
+        db.write_cache(doc)
+        return db.read_cache
+
+    def test_an_offline_cache_is_never_served_to_a_networked_request(self):
+        # The herdr pane refreshes offline every 30s. Without this, a /standup
+        # would almost always read a document with no pull requests in it and
+        # report "no open PRs" with nothing in errors.
+        read = self._cached({"schema": db.SCHEMA, "net": False})
+        self.assertIsNone(read(3600, net=True))
+        self.assertIsNotNone(read(3600, net=False))
+
+    def test_a_networked_cache_serves_either_kind_of_request(self):
+        read = self._cached({"schema": db.SCHEMA, "net": True})
+        self.assertIsNotNone(read(3600, net=True))
+        self.assertIsNotNone(read(3600, net=False))
+
+    def test_an_explicit_since_is_not_answered_from_a_different_window(self):
+        read = self._cached(
+            {"schema": db.SCHEMA, "net": True, "window": {"since": "2026-08-20T00:00:00+02:00"}}
+        )
+        self.assertIsNone(read(3600, since="2026-08-18"))
+        self.assertIsNotNone(read(3600, since="2026-08-20"))
+        # No --since means "whatever window you detected" and any cache will do.
+        self.assertIsNotNone(read(3600))
+
+    def test_a_cache_holding_a_json_scalar_is_rejected(self):
+        read = self._cached({"schema": db.SCHEMA, "net": True})
+        db.CACHE_PATH.write_text("42", encoding="utf-8")
+        self.assertIsNone(read(3600))
 
     def test_the_cache_is_not_world_readable(self):
         # It holds commit subjects, PR titles, and the first line of prompts.

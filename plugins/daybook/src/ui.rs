@@ -43,10 +43,10 @@ fn status_color(status: &str) -> Color {
 }
 
 fn panel(title: &str, count: Option<usize>) -> Block<'static> {
-    let mut label = format!(" {title} ");
-    if let Some(n) = count {
-        label = format!(" {title} {n} ");
-    }
+    let label = match count {
+        Some(n) => format!(" {title} {n} "),
+        None => format!(" {title} "),
+    };
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)

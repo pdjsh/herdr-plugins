@@ -56,6 +56,9 @@ pub struct App {
     pub collecting: bool,
     /// True while the displayed pull-request data came from an earlier pass.
     pub prs_carried: bool,
+    /// Rows the open-loops panel had in the last frame. Kept on the state so
+    /// `clamp` can re-derive the scroll offset without a terminal to measure.
+    list_height: usize,
     collector: Collector,
     rx: Option<Receiver<Result<Doc, String>>>,
     last: Instant,
@@ -107,6 +110,9 @@ impl App {
             net: true,
             collecting: false,
             prs_carried: false,
+            // Replaced by the real height on the first frame; non-zero so a
+            // clamp before the first draw still behaves.
+            list_height: 20,
             collector,
             rx: None,
             last: Instant::now(),
@@ -157,6 +163,12 @@ impl App {
                 self.error = Some(message);
                 self.rx = None;
                 self.collecting = false;
+                // Both clocks have to move, or the next iteration sees a due
+                // full refresh (`last_full` is None until one succeeds) and
+                // respawns the collector every ~120ms forever. A fast-failing
+                // script — missing `python3`, a syntax error — would otherwise
+                // spin, and an intermittently-failing one would hammer `gh`.
+                self.mark_attempted();
                 true
             }
             Err(TryRecvError::Empty) => false,
@@ -171,11 +183,25 @@ impl App {
         }
     }
 
+    /// Note that a collection was attempted, successfully or not, so neither
+    /// cadence fires again immediately.
+    fn mark_attempted(&mut self) {
+        let now = Instant::now();
+        self.last = now;
+        self.last_full = Some(now);
+    }
+
     fn apply(&mut self, mut doc: Doc) {
         self.prs_carried = false;
         if doc.net {
             self.net_prs = Some(NetPrs::from(&doc));
-            self.last_full = Some(Instant::now());
+            // A cached document does not reset the full-refresh clock. The first
+            // paint accepts a cache up to 15 minutes old, and treating that as
+            // "just refreshed" would defer the real pass by another 5 — showing
+            // 20-minute-old CI state with nothing saying so.
+            if !doc.from_cache {
+                self.last_full = Some(Instant::now());
+            }
         } else if let Some(snapshot) = &self.net_prs {
             // An offline pass knows nothing about pull requests. Blanking them
             // would be a lie of omission, so the last networked answer is
@@ -206,13 +232,21 @@ impl App {
             .unwrap_or(0)
     }
 
+    /// Pull the cursor and the scroll offset back inside the list.
+    ///
+    /// Both, not just the cursor: a refresh that shortens the list leaves an
+    /// offset past its end, and the panel then renders `items[offset..len]` —
+    /// which is empty — so it paints blank while its border still reports a
+    /// count. `list_height` is what the last frame actually had room for.
     fn clamp(&mut self) {
         let n = self.visible();
-        self.cursor = self.cursor.min(n.saturating_sub(1));
         if n == 0 {
             self.cursor = 0;
             self.offset = 0;
+            return;
         }
+        self.cursor = self.cursor.min(n - 1);
+        self.offset = ui::scroll_offset(n, self.list_height, self.cursor, self.offset);
     }
 
     fn move_cursor(&mut self, delta: isize, height: usize) {
@@ -220,6 +254,7 @@ impl App {
         if n == 0 {
             return;
         }
+        self.list_height = height;
         let next = (self.cursor as isize + delta).clamp(0, n as isize - 1) as usize;
         self.cursor = next;
         self.offset = ui::scroll_offset(n, height, self.cursor, self.offset);
@@ -250,6 +285,9 @@ fn run_tui(mut app: App) -> Result<()> {
             term.draw(|f| ui::draw(f, &app))?;
             let size = term.size()?;
             let height = loops_height(Rect::new(0, 0, size.width, size.height));
+            // Recorded so a collection landing between frames can clamp against
+            // the height the user is actually looking at.
+            app.list_height = height;
 
             if event::poll(Duration::from_millis(120))?
                 && let Event::Key(k) = event::read()?
@@ -272,8 +310,6 @@ fn run_tui(mut app: App) -> Result<()> {
                         // Housekeeping is worth hiding when the list is long.
                         app.max_severity = if app.max_severity >= 4 { 3 } else { 4 };
                         app.clamp();
-                        app.offset =
-                            ui::scroll_offset(app.visible(), height, app.cursor, app.offset);
                     }
                     KeyCode::Char('n') => {
                         app.net = !app.net;
@@ -483,6 +519,63 @@ mod tests {
                 "{kind}"
             );
         }
+    }
+
+    #[test]
+    fn a_shortened_list_does_not_leave_the_panel_scrolled_past_its_end() {
+        // The regression: `clamp` fixed the cursor but not the offset, so the
+        // panel rendered `items[offset..len]` — empty — and painted blank while
+        // its border still reported a count.
+        let mut app = app_with(&[1; 30]);
+        app.move_cursor(29, 6);
+        assert!(
+            app.offset > 5,
+            "expected to be scrolled, got {}",
+            app.offset
+        );
+        app.apply(doc_with(&[1, 1, 1]));
+        assert!(
+            app.offset < app.visible(),
+            "offset {} is past the {} remaining items",
+            app.offset,
+            app.visible()
+        );
+        assert_eq!(app.cursor, 2);
+    }
+
+    #[test]
+    fn hiding_a_band_also_pulls_the_offset_back() {
+        let mut app = app_with(&[1, 4, 4, 4, 4, 4, 4, 4, 4, 4]);
+        app.move_cursor(9, 4);
+        app.max_severity = 3;
+        app.clamp();
+        assert_eq!(app.visible(), 1);
+        assert_eq!(app.offset, 0);
+    }
+
+    #[test]
+    fn a_failed_collection_moves_both_refresh_clocks() {
+        // Otherwise `full_due` is true forever (last_full stays None) and the
+        // loop respawns the collector every ~120ms.
+        let mut app = App::new(Collector::for_test());
+        assert!(app.last_full.is_none());
+        app.mark_attempted();
+        assert!(app.last_full.is_some());
+        assert!(app.age() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_cached_document_does_not_reset_the_full_refresh_clock() {
+        // The first paint accepts a 15-minute-old cache. Treating that as "just
+        // refreshed" would defer the real pass by another five.
+        let mut app = App::new(Collector::for_test());
+        app.apply(serde_json::from_str(r#"{"schema":1,"net":true,"from_cache":true}"#).unwrap());
+        assert!(
+            app.last_full.is_none(),
+            "a cached document must still leave a full pass due"
+        );
+        app.apply(serde_json::from_str(r#"{"schema":1,"net":true}"#).unwrap());
+        assert!(app.last_full.is_some());
     }
 
     #[test]

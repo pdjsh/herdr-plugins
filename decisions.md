@@ -406,3 +406,143 @@ herdr plugin unlink daybook && herdr plugin link ~/Projects/herdr-plugins/plugin
 2. Should `stakingrewards` (and repos like it) be exempt from base-drift warnings?
 3. Do you want `/standup` scheduled, or typed?
 4. Sanitise `agent-map`'s README screenshot as well?
+
+---
+
+## Addendum — verification and two security fixes
+
+Written after the sections above, from actually running the things they assumed.
+
+### The popup does open (that assumption is now retired)
+
+`herdr plugin pane open --plugin daybook --entrypoint brief` spawns it, herdr
+clamps the requested 120×32 to the window (117×30 here), the binary runs with the
+plugin root as its working directory as the manifest expects, and closing it
+reaps cleanly. I opened one, confirmed it, and closed it again, so your screen is
+as you left it.
+
+Two herdr facts fell out of that, and **the README was wrong about the first
+one before this branch**:
+
+- `herdr plugin pane open` takes `--plugin` and `--entrypoint` flags. The
+  documented `herdr plugin pane open agent-map map` fails with `unknown option:
+  agent-map`. Fixed for both plugins.
+- An overlay pane is **not addressable by `herdr plugin pane close`** — every id
+  shape I tried returned `plugin_pane_not_found`, and it does not appear in
+  `herdr pane list` or `herdr api snapshot` either. `q` from inside is the way
+  out. Noted in the README rather than worked around.
+
+### Two findings from the security pass, both fixed
+
+`/security-review` refuses to run outside a git repository and this session's
+working directory is `~/.config`, so I did the pass by hand. The clean parts:
+every `subprocess.run` and `Command::new` takes an argument list, never a shell
+string, so a repository directory called `; rm -rf ~` is inert; `stdin` is
+`DEVNULL` and `GIT_TERMINAL_PROMPT=0`, so nothing can hang on a credential
+prompt; every call has a timeout; nothing leaves the machine except `gh` talking
+to GitHub with its own stored token, which is never read or printed.
+
+Two things did need changing:
+
+1. **The collector lookup was anchored on the working directory.** The first
+   candidate was the relative `../../tools/daybook/daybook-collect.py`, which
+   herdr resolves correctly because it spawns panes in the plugin root — but the
+   binary run from anywhere else would execute *that* directory's script. Now
+   anchored on `std::env::current_exe()`, which cannot be redirected by a cwd,
+   and verified by running the binary from `/private/tmp` and checking
+   `--where`.
+
+2. **The cache was world-readable.** `~/.cache/daybook/latest.json` holds commit
+   subjects, PR titles and the first 160 characters of Claude prompts. Now
+   written 0600, with a test asserting the mode. The temporary file also carries
+   the pid now, because the pane refreshes every 30s and a `/standup` in another
+   window can easily overlap it.
+
+Remaining, and deliberate: the cache is trusted on read (a local attacker who can
+write your home directory can put strings in your briefing — they already have
+your uid), and `identities` in the output lists your own committer emails, which
+are in every commit you have ever made. `gitleaks` is still not installed, so the
+diff got a manual read rather than a scan.
+
+---
+
+## Addendum — code review, and the three bugs it caught
+
+An independent review pass read the whole diff. Eleven findings; all eleven are
+fixed on this branch. Three of them mattered:
+
+### 1. The pane was poisoning the cache the briefing reads
+
+The worst of the lot, and it broke the central premise. `Collector::run` passed
+`--max-age` and `--no-net` but never `--no-cache`, so every 30-second offline
+refresh wrote a document with **empty pull-request lists** into
+`~/.cache/daybook/latest.json`. `/standup` runs `daybook-collect --max-age 300`.
+With the pane open — the intended workflow — the cache was essentially always
+under 30 seconds old and offline-collected, so a briefing would have reported
+zero open PRs, zero reviews requested and no failing CI, with nothing in `errors`
+to say the entire `gh` source had vanished.
+
+Fixed twice over, because one fix protects only the caller that remembers it:
+the pane now passes `--no-cache` on offline passes, *and* `read_cache` refuses to
+serve an offline-collected document to a caller that asked for the network. The
+same check now also refuses a cache whose window does not match an explicit
+`--since`, which was silently ignored before.
+
+### 2. A refresh that shortened the list blanked the panel
+
+`clamp()` pulled the cursor back into range but left the scroll offset alone. Sit
+at the bottom of a 30-item list, refresh into a 5-item one, and the panel rendered
+`items[25..5]` — nothing — painting an empty box whose border still read
+"open loops 5", recoverable only by pressing `j`. The offset is now re-derived
+against the height of the last frame, which the state carries for exactly this
+reason.
+
+### 3. A failing collector spun in a hot loop
+
+On error, `poll()` set the message and cleared the busy flag but moved neither
+refresh clock — and `last_full` is `None` until a pass *succeeds*, so the full
+refresh read as due on every iteration. A collector that fails fast (no `python3`,
+a syntax error, a bad `DAYBOOK_COLLECT`) would respawn a thread and a subprocess
+every ~120ms indefinitely; one that failed intermittently would have blown
+straight through the `gh` budget the cadence was designed around. Both clocks now
+move on failure, so a broken collector retries on the ordinary 30s cadence.
+
+### The rest
+
+- `--no-net` was still making one network call: `identities()` runs `gh api user`
+  to learn your GitHub login. Offline that cost a 10s DNS timeout per refresh.
+  Skipped now — and the offline pass dropped from 1.6s to **0.79s**, so `gh api
+  user` was half the cost of the "fast" path. The README's timing claim is
+  corrected.
+- The merged-PR query used `gh search prs`' default `best-match` ordering over a
+  40-row slice, so on an account with a long history yesterday's merges could
+  simply not be in the returned rows. Now `--sort=updated` with a server-side
+  `--merged-at=>=<since>`; the client-side filter stays as a backstop.
+- The first paint accepts a cache up to 15 minutes old, and `apply` was treating
+  that as "just refreshed" — deferring the real pass another five, so displayed CI
+  state could be 20 minutes stale with nothing saying so. A cached document no
+  longer resets the full-refresh clock.
+- The `git status --porcelain -z` parser skipped a rename's second path field but
+  not a **copy's**, so under `status.renames = copies` the source path was parsed
+  as a fresh entry with its first two characters read as status codes. Now handles
+  `R` and `C`.
+- An exception in `repo_history` escaped `pool.map` and would have taken the whole
+  collection down, unlike the checkout fan-out beside it which is explicitly
+  guarded. Now guarded the same way.
+- `XDG_CACHE_HOME` / `XDG_CONFIG_HOME` were taken verbatim. Set-but-empty — common
+  in stripped launchd environments — yielded a *relative* path, so the cache would
+  have landed in whatever repository the pane was launched from, inside a checkout
+  it was simultaneously reporting as dirty. Both now go through `expand()` with an
+  empty-value fallback.
+
+Each of the three serious ones has a regression test named after the failure.
+
+### One finding I did not take at face value
+
+The review said `truncate` counting characters rather than display columns would
+let a wide glyph "clip into the neighbouring panel's border". The counting is
+indeed by character — that part is right, and the doc comment overclaimed, so it
+is corrected. But ratatui renders each widget within its own `Rect` and will not
+write a cell outside it, so the cost is a few clipped trailing characters, not a
+corrupted neighbour. Not worth a `unicode-width` dependency for that, and the
+comment now says so explicitly.

@@ -344,6 +344,12 @@ impl Collector {
 
     /// Collect once. `max_age` lets the first paint come from a warm cache
     /// instead of a five-second wait; `r` in the pane passes zero.
+    ///
+    /// An offline pass is explicitly told not to write the cache. That cache is
+    /// shared with the `/standup` skill, and this pane refreshes offline every
+    /// 30s — so without `--no-cache` a standup would nearly always read a
+    /// document with empty pull-request lists and report "no open PRs" with
+    /// nothing in `errors` to explain it.
     pub fn run(&self, max_age: u64, net: bool) -> Result<Doc> {
         let mut cmd = if self.via_python {
             let mut c = Command::new("python3");
@@ -354,7 +360,7 @@ impl Collector {
         };
         cmd.arg("--max-age").arg(max_age.to_string());
         if !net {
-            cmd.arg("--no-net");
+            cmd.arg("--no-net").arg("--no-cache");
         }
         let out = cmd
             .output()
@@ -386,8 +392,14 @@ pub fn parse(bytes: &[u8]) -> Result<Doc> {
     Ok(doc)
 }
 
-/// Fit a string into `max` display columns, ellipsising rather than panicking
-/// on a multi-byte boundary.
+/// Fit a string into `max` *characters*, ellipsising on a character boundary
+/// rather than panicking on a multi-byte one.
+///
+/// Characters, not display columns: a CJK ideograph or an emoji counts as one
+/// here and occupies two on screen. ratatui clips within each widget's own
+/// area, so the overflow costs a few trailing characters rather than bleeding
+/// into the neighbouring panel — acceptable for titles and commit subjects, and
+/// the reason this does not pull in `unicode-width`.
 pub fn truncate(s: &str, max: usize) -> String {
     let n = s.chars().count();
     if n <= max {

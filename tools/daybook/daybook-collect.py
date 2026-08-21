@@ -49,13 +49,29 @@ from typing import Any
 
 SCHEMA = 1
 
+
+def expand(p: str | Path) -> Path:
+    return Path(os.path.expandvars(str(p))).expanduser()
+
+
 HOME = Path.home()
-CACHE_PATH = Path(
-    os.environ.get("XDG_CACHE_HOME", HOME / ".cache")
-) / "daybook" / "latest.json"
-CONFIG_PATH = Path(
-    os.environ.get("XDG_CONFIG_HOME", HOME / ".config")
-) / "daybook" / "config.toml"
+
+
+def _xdg(var: str, default: str) -> Path:
+    """An XDG base directory, tolerating the ways it is usually wrong.
+
+    Set-but-empty is common in stripped launchd and systemd environments, and
+    taking it verbatim yields a *relative* path — so the cache would land in
+    whatever repository the pane happened to be launched from, inside a checkout
+    it is simultaneously reporting as dirty. A `~` in the value is expanded for
+    the same reason: this is a hand-edited variable.
+    """
+    value = os.environ.get(var, "").strip()
+    return expand(value) if value else expand(default)
+
+
+CACHE_PATH = _xdg("XDG_CACHE_HOME", "~/.cache") / "daybook" / "latest.json"
+CONFIG_PATH = _xdg("XDG_CONFIG_HOME", "~/.config") / "daybook" / "config.toml"
 
 # Defaults chosen from this machine's layout. Everything here is overridable in
 # config.toml so the script survives being synced to another machine.
@@ -90,10 +106,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # small helpers
 # ---------------------------------------------------------------------------
-
-
-def expand(p: str | Path) -> Path:
-    return Path(os.path.expandvars(str(p))).expanduser()
 
 
 def run(
@@ -168,7 +180,7 @@ def load_config() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def identities(cfg: dict[str, Any], repos: list[Path]) -> set[str]:
+def identities(cfg: dict[str, Any], repos: list[Path], net: bool = True) -> set[str]:
     """Every name/email that counts as "me" when attributing a commit.
 
     Gathered rather than configured because this machine has two git identities
@@ -183,7 +195,9 @@ def identities(cfg: dict[str, Any], repos: list[Path]) -> set[str]:
     for repo in repos[:40]:
         _, out, _ = run(["git", "-C", str(repo), "config", "--get-all", "user.email"])
         found.update(line.strip().lower() for line in out.splitlines() if line.strip())
-    if shutil.which("gh"):
+    # `gh api user` is a network round trip, and `--no-net` promises none. On a
+    # plane that call costs a DNS timeout on every refresh.
+    if net and shutil.which("gh"):
         _, out, _ = run(["gh", "api", "user", "--jq", ".login"], timeout=10)
         if out.strip():
             found.add(out.strip().lower())
@@ -278,8 +292,11 @@ def inspect_checkout(path: Path, timeout: float) -> dict[str, Any]:
         if len(entry) < 4:
             continue
         x, y, name = entry[0], entry[1], entry[3:]
-        if x == "R" or y == "R":
-            i += 1  # a rename carries its old path in the following field
+        # Renames *and copies* emit `XY <to>\0<from>\0`. Missing the copy case
+        # meant the old path was parsed as a fresh entry, with its first two
+        # characters read as status codes.
+        if x in "RC" or y in "RC":
+            i += 1
         if x == "?" and y == "?":
             untracked += 1
         else:
@@ -427,10 +444,18 @@ def collect_repos(
             }
         )
 
+    def safe_history(repo: dict[str, Any]) -> dict[str, Any]:
+        # `pool.map` re-raises inside the consuming loop, which would take the
+        # whole collection down over one malformed repository — exactly the
+        # failure mode the checkout fan-out above guards against.
+        try:
+            return repo_history(Path(repo["path"]), since_iso, me, timeout)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"git log {repo['name']}: {type(exc).__name__}: {exc}")
+            return {"commits": [], "commits_by_others": 0, "fetched_hours_ago": None}
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        histories = pool.map(
-            lambda r: repo_history(Path(r["path"]), since_iso, me, timeout), repos
-        )
+        histories = list(pool.map(safe_history, repos))
         for repo, history in zip(repos, histories):
             repo.update(history)
             repo["dirty"] = sum(c["dirty"] for c in repo["checkouts"])
@@ -527,12 +552,21 @@ def collect_prs(cfg: dict[str, Any], since: dt.datetime) -> tuple[dict[str, Any]
         return prs, ["gh not on PATH — pull requests skipped"]
     timeout = float(cfg.get("timeout", 20))
 
-    # gh's own `--merged-at` filter is not available on every version, so the
-    # window is applied here against a bounded recent slice instead.
+    # `--sort` matters more than it looks: the default is `best-match`, so a
+    # relevance-ranked slice of 40 can omit yesterday's merges entirely on an
+    # account with a long history. `--merged-at` narrows it server-side; the
+    # client-side filter below stays as a backstop for older `gh` builds that
+    # ignore the flag.
+    since_day = since.date().isoformat()
     queries = {
-        "mine": ["--author=@me", "--state=open", "--limit=30"],
-        "review_requested": ["--review-requested=@me", "--state=open", "--limit=30"],
-        "merged_in_window": ["--author=@me", "--merged", "--limit=40"],
+        "mine": ["--author=@me", "--state=open", "--sort=updated", "--limit=30"],
+        "review_requested": [
+            "--review-requested=@me", "--state=open", "--sort=updated", "--limit=30",
+        ],
+        "merged_in_window": [
+            "--author=@me", "--merged", f"--merged-at=>={since_day}",
+            "--sort=updated", "--limit=40",
+        ],
     }
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         futures = {k: pool.submit(gh_search, a, timeout) for k, a in queries.items()}
@@ -1068,7 +1102,7 @@ def collect(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     # Discovered once and threaded through: it walks the filesystem, and both
     # identity detection and repository inspection need the same list.
     checkout_paths = discover_repos(cfg)
-    me = identities(cfg, checkout_paths)
+    me = identities(cfg, checkout_paths, net=not args.no_net)
 
     # git, gh, transcripts and the socket touch nothing in common, so the whole
     # collection is one fan-out. On this machine that is ~1s instead of ~5s.
@@ -1217,7 +1251,16 @@ def render_text(doc: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def read_cache(max_age: float) -> dict[str, Any] | None:
+def read_cache(max_age: float, net: bool = True, since: str | None = None) -> dict[str, Any] | None:
+    """A cached document, if it answers the question actually being asked.
+
+    Age is not the only thing that makes a cache wrong. A document collected with
+    `--no-net` has empty pull-request lists, and serving that to a caller who
+    wanted the network reports "no open PRs" with nothing in `errors` — the herdr
+    pane refreshes offline every 30s, so without this check a `/standup` run
+    would almost always read one. An explicit `--since` likewise describes a
+    different window than whatever the cache was built for.
+    """
     if max_age <= 0:
         return None
     try:
@@ -1227,8 +1270,12 @@ def read_cache(max_age: float) -> dict[str, Any] | None:
         doc = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if doc.get("schema") != SCHEMA:
+    if not isinstance(doc, dict) or doc.get("schema") != SCHEMA:
         return None  # a cache from an older shape is worse than no cache
+    if net and not doc.get("net"):
+        return None
+    if since and (doc.get("window") or {}).get("since", "")[:10] != since:
+        return None
     doc["from_cache"] = True
     doc["cache_age_seconds"] = round(age)
     return doc
@@ -1271,7 +1318,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--indent", type=int, default=None, help="pretty-print JSON with this indent")
     args = ap.parse_args(argv)
 
-    doc = read_cache(args.max_age)
+    doc = read_cache(args.max_age, net=not args.no_net, since=args.since)
     if doc is None:
         doc = collect(load_config(), args)
         if not args.no_cache:
