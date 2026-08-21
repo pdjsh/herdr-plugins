@@ -546,3 +546,25 @@ is corrected. But ratatui renders each widget within its own `Rect` and will not
 write a cell outside it, so the cost is a few clipped trailing characters, not a
 corrupted neighbour. Not worth a `unicode-width` dependency for that, and the
 comment now says so explicitly.
+
+---
+
+## Addendum — long-lived branches are exempt from base-drift warnings
+
+You confirmed the `stakingrewards` checkout sitting on `staging`, 241 commits
+behind `origin/main`, is intentional — you just don't check that branch out often.
+So the warning was noise, and it would have been noise every single morning.
+
+Rather than a per-repo ignore list, the exemption is by **branch role**:
+`behind_base` and `no-upstream` are now suppressed for branches named in
+`long_lived_branches` (`main`, `master`, `staging`, `develop`, `dev`,
+`production`, `prod`, `trunk`, and the prefixes `release/` and `hotfix/`). A
+trailing `/` makes an entry a prefix match, so `release/` covers
+`release/2026-08` without also catching `release-notes-fix`.
+
+Branch role generalises where a repo list would not: the same rule quiets every
+repository parked on a base branch, including ones you clone next week, and it
+keeps flagging a *feature* branch that has drifted 241 commits behind — which is
+the case the warning was written for. Dirt, unpushed commits and stashes are
+still reported on a long-lived branch; the exemption is narrowly about drift from
+base and about a base branch legitimately having no upstream.

@@ -390,6 +390,57 @@ class TestXdgPaths(unittest.TestCase):
         self.assertNotIn("~", str(path))
 
 
+class TestLongLivedBranches(unittest.TestCase):
+    PATTERNS = db.DEFAULT_CONFIG["long_lived_branches"]
+
+    def test_the_usual_base_branch_names_are_long_lived(self):
+        for branch in ("main", "master", "staging", "develop", "production", "trunk"):
+            self.assertTrue(db.is_long_lived(branch, self.PATTERNS), branch)
+
+    def test_a_trailing_slash_is_a_prefix_match(self):
+        self.assertTrue(db.is_long_lived("release/2026-08", self.PATTERNS))
+        self.assertTrue(db.is_long_lived("hotfix/urgent", self.PATTERNS))
+        # …and only a prefix match: `release/` must not catch `release-notes`.
+        self.assertFalse(db.is_long_lived("release-notes-fix", self.PATTERNS))
+
+    def test_feature_branches_are_not_long_lived(self):
+        for branch in ("feat/x", "fix/y", "PROD-1234-thing", "mainline", "stagingish"):
+            self.assertFalse(db.is_long_lived(branch, self.PATTERNS), branch)
+
+    def test_empty_and_missing_names_are_not_long_lived(self):
+        self.assertFalse(db.is_long_lived("", self.PATTERNS))
+        self.assertFalse(db.is_long_lived(None, self.PATTERNS))
+
+    def test_an_empty_pattern_matches_nothing(self):
+        self.assertFalse(db.is_long_lived("main", ["", "   "]))
+
+    def test_base_drift_is_not_reported_for_a_long_lived_branch(self):
+        # The real case: a repo parked on `staging`, 241 commits behind main by
+        # design, was filing a housekeeping item every single morning.
+        noisy = attention(
+            repos=[repo(checkouts=[checkout(branch="staging", behind_base=241)])]
+        )
+        self.assertNotIn("behind-base", kinds(noisy))
+        # A feature branch that far behind its base still gets flagged.
+        real = attention(
+            repos=[repo(checkouts=[checkout(branch="feat/x", behind_base=241)])]
+        )
+        self.assertIn("behind-base", kinds(real))
+
+    def test_a_long_lived_branch_with_no_upstream_is_not_flagged_either(self):
+        quiet = attention(
+            repos=[repo(checkouts=[checkout(branch="staging", has_upstream=False)])]
+        )
+        self.assertNotIn("no-upstream", kinds(quiet))
+
+    def test_dirt_is_still_reported_on_a_long_lived_branch(self):
+        # The exemption is about drift from base, not about ignoring the branch.
+        items = attention(
+            repos=[repo(checkouts=[checkout(branch="staging", dirty=3)], dirty=3)]
+        )
+        self.assertIn("dirty", kinds(items))
+
+
 class TestWindow(unittest.TestCase):
     def test_explicit_since_is_taken_verbatim(self):
         start, window = db.resolve_window(dict(db.DEFAULT_CONFIG), "2026-08-18")

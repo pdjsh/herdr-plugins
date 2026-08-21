@@ -101,6 +101,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # people's repositories crowd out everything actionable.
     "pr_stale_days": 7,
     "pr_dormant_days": 45,
+    # Branches that are supposed to lag the default branch. "N commits behind
+    # origin/main" is only actionable on a branch you intend to merge; on a
+    # long-lived one it is the normal state of affairs, so warning about it is
+    # pure noise. Matched exactly, or as a prefix when the entry ends in `/`.
+    "long_lived_branches": [
+        "main",
+        "master",
+        "staging",
+        "develop",
+        "dev",
+        "production",
+        "prod",
+        "trunk",
+        "release/",
+        "hotfix/",
+    ],
 }
 
 # ---------------------------------------------------------------------------
@@ -915,6 +931,25 @@ SEV_LOOSE = 3  # work in flight that will rot if left
 SEV_TIDY = 4  # housekeeping
 
 
+def is_long_lived(branch: str, patterns: list[str]) -> bool:
+    """Whether a branch is one that is expected to sit behind the default branch.
+
+    A trailing `/` in a pattern makes it a prefix match, so `release/` covers
+    `release/2026-08` without also matching `release-notes-fix`.
+    """
+    name = (branch or "").strip()
+    for pattern in patterns:
+        text = str(pattern).strip()
+        if not text:
+            continue
+        if text.endswith("/"):
+            if name.startswith(text):
+                return True
+        elif name == text:
+            return True
+    return False
+
+
 def build_attention(
     repos: list[dict],
     prs: dict[str, Any],
@@ -926,6 +961,7 @@ def build_attention(
     items: list[dict[str, Any]] = []
     stale_days = int(cfg.get("pr_stale_days", 7))
     dormant_days = int(cfg.get("pr_dormant_days", 45))
+    long_lived = list(cfg.get("long_lived_branches", []))
 
     def add(sev: int, kind: str, text: str, hint: str = "", where: str = "") -> None:
         items.append({"severity": sev, "kind": kind, "text": text, "hint": hint, "where": where})
@@ -1036,7 +1072,11 @@ def build_attention(
                     "git push",
                     co["path"],
                 )
-            if not co["has_upstream"] and co["branch"] not in ("main", "master", "(detached)"):
+            if (
+                not co["has_upstream"]
+                and co["branch"] != "(detached)"
+                and not is_long_lived(co["branch"], long_lived)
+            ):
                 add(
                     SEV_LOOSE,
                     "no-upstream",
@@ -1044,7 +1084,9 @@ def build_attention(
                     "git push -u origin HEAD",
                     co["path"],
                 )
-            if co["behind_base"] >= 20:
+            # Only branches you intend to merge. A long-lived branch trailing
+            # the default one is its normal state, not a loose end.
+            if co["behind_base"] >= 20 and not is_long_lived(co["branch"], long_lived):
                 add(
                     SEV_TIDY,
                     "behind-base",

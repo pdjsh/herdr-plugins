@@ -157,6 +157,11 @@ extra_repos = ["~/.local/share/chezmoi"]
 identities = ["me@example.com"]   # beyond what git config reports
 pr_stale_days = 7
 pr_dormant_days = 45
+
+# Branches expected to sit behind the default branch. "241 commits behind
+# origin/main" is actionable on a branch you mean to merge and pure noise on one
+# you don't. A trailing `/` makes an entry a prefix match.
+long_lived_branches = ["main", "master", "staging", "develop", "release/"]
 ```
 
 `daybook --where` prints which collector the pane resolved, which is the first
